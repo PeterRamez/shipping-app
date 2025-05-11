@@ -1,77 +1,129 @@
 import streamlit as st
 import pandas as pd
+from difflib import get_close_matches
 
+st.set_page_config(page_title="📦 Shipping Rates Analyzer", layout="wide")
 st.title("📦 Shipping Rates Analyzer")
 
-# Upload file
 uploaded_file = st.file_uploader("Upload your Excel or CSV file", type=["csv", "xlsx"])
 
-# If the file is uploaded
+# Keywords for flexible column mapping
+target_columns = {
+    'POL': ['pol', 'port of loading', 'loading port'],
+    'POD': ['pod', 'port of discharge', 'destination port'],
+    "20'DC": ['20', "20'dc", '20ft', '20-foot', '20dc'],
+    "40'DC/HC": ['40', "40'dc", '40hc', '40ft', '40-foot', '40dc'],
+    "LTHC'20": ['lthc 20', 'local 20'],
+    "LTHC'40": ['lthc 40', 'local 40'],
+    'CURRENCY': ['currency', 'curr'],
+    'F.TIME': ['freetime', 'f.time', 'f time', 'transit time', 'duration'],
+    'REMARKS': ['remarks', 'note', 'comment', 'free days', 'free days at pod']
+}
+
+def smart_map_columns(df):
+    mapped_cols = {}
+    lower_cols = {col: col.lower().strip() for col in df.columns}
+
+    for target, keywords in target_columns.items():
+        found = None
+        for orig_col, col_clean in lower_cols.items():
+            if any(keyword in col_clean for keyword in keywords):
+                found = orig_col
+                break
+        if not found:
+            # fallback: fuzzy match
+            matches = get_close_matches(target.lower(), lower_cols.values(), n=1, cutoff=0.6)
+            if matches:
+                match_val = matches[0]
+                for orig_col, col_clean in lower_cols.items():
+                    if col_clean == match_val:
+                        found = orig_col
+                        break
+        if found:
+            mapped_cols[found] = target
+
+    df.rename(columns=mapped_cols, inplace=True)
+    return df
+
 if uploaded_file:
     try:
-        # Read the file based on its type (CSV or Excel)
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file)
         else:
             df = pd.read_excel(uploaded_file)
 
-        # Clean column names (strip any leading/trailing spaces)
-        df.columns = df.columns.str.strip()
+        df.columns = df.columns.str.strip().str.upper()
+        st.write("✅ Detected columns:", df.columns.tolist())
 
-        # Rename any incorrect column names (e.g., "CURRENCEY" to "CURRENCY")
-        if 'CURRENCEY' in df.columns:
-            df.rename(columns={'CURRENCEY': 'CURRENCY'}, inplace=True)
+        # Apply smart mapping
+        df = smart_map_columns(df)
 
-        # Drop rows with empty values in crucial columns: POL, POD, and CARRIER
-        df.dropna(subset=['POL', 'POD', 'CARRIER'], inplace=True)
+        required_columns = ['POL', 'POD']
+        for col in required_columns:
+            if col not in df.columns:
+                suggestions = get_close_matches(col, df.columns, n=1, cutoff=0.6)
+                if suggestions:
+                    df.rename(columns={suggestions[0]: col}, inplace=True)
+                    st.info(f"🔄 Auto-mapped '{suggestions[0]}' to '{col}'")
 
-        # Normalize POL and POD columns: strip spaces and make uppercase
-        df['POL'] = df['POL'].str.strip().str.upper()
-        df['POD'] = df['POD'].str.strip().str.upper()
+        missing_cols = [col for col in required_columns if col not in df.columns]
+        if missing_cols:
+            st.warning("Some required columns are missing. Please map them manually:")
+            for col in missing_cols:
+                selected = st.selectbox(f"Select a column to use as '{col}':", df.columns, key=col)
+                df.rename(columns={selected: col}, inplace=True)
 
-        # Get unique POL options and display as a dropdown
-        pol_options = sorted(df['POL'].dropna().unique())
-        selected_pol = st.selectbox("Select Port of Loading (POL):", pol_options)
+        missing_cols = [col for col in required_columns if col not in df.columns]
+        if missing_cols:
+            st.error(f"❌ The following required columns are still missing: {missing_cols}")
+        else:
+            df.dropna(subset=['POL', 'POD'], inplace=True)
+            df['POL'] = df['POL'].astype(str).str.strip().str.upper()
+            df['POD'] = df['POD'].astype(str).str.strip().str.upper()
 
-        # Filter the dataframe by the selected POL
-        if selected_pol:
-            filtered_df = df[df['POL'] == selected_pol.upper()]
+            pol_options = sorted(df['POL'].unique())
+            selected_pol = st.selectbox("Select Port of Loading (POL):", pol_options)
 
-            # Get unique POD options based on the selected POL
-            pod_options = sorted(filtered_df['POD'].dropna().unique())
-            selected_pod = st.selectbox("Select Port of Discharge (POD):", pod_options)
+            if selected_pol:
+                df_filtered = df[df['POL'] == selected_pol]
+                pod_options = sorted(df_filtered['POD'].unique())
+                selected_pod = st.selectbox("Select Port of Discharge (POD):", pod_options)
 
-            # Filter the dataframe further by the selected POD
-            if selected_pod:
-                final_filtered_df = filtered_df[filtered_df['POD'] == selected_pod.upper()]
+                if selected_pod:
+                    final_df = df_filtered[df_filtered['POD'] == selected_pod]
 
-                # Group by POL, POD, and CARRIER to merge duplicates, selecting the minimum price
-                grouped_df = final_filtered_df.groupby(['POL', 'POD', 'CARRIER'], as_index=False).agg({
-                    "20'DC": 'min',   # Take the minimum 20'DC cost
-                    "40'DC/HC": 'min', # Take the minimum 40'DC/HC cost
-                    'CURRENCY': 'first',  # Assuming all entries have the same currency
-                    'F.TIME': 'first',  # Assuming the first "F.TIME" is fine for all entries
-                    'REMARKS': 'first'   # Take the first remark (you can modify if needed)
-                })
+                    # Columns to show
+                    columns_to_show = [
+                        'POL', 'POD',
+                        "20'DC", "40'DC/HC",
+                        "LTHC'20", "LTHC'40",
+                        'CURRENCY', 'F.TIME', 'REMARKS'
+                    ]
+                    available_cols = [col for col in columns_to_show if col in final_df.columns]
 
-                if not grouped_df.empty:
-                    # Display results
-                    st.subheader(f"📦 Shipping Options from {selected_pol.upper()} to {selected_pod.upper()}")
-                    
-                    # Display sorted by 20'DC prices (cheapest first)
-                    st.subheader("🔹 Sorted by Cheapest 20'DC Prices")
-                    st.dataframe(grouped_df[['POD', 'CARRIER', "20'DC", 'CURRENCY', 'F.TIME', 'REMARKS']].sort_values(by="20'DC"))
+                    # Grouping logic
+                    agg_funcs = {col: 'min' for col in ["20'DC", "40'DC/HC", "LTHC'20", "LTHC'40"] if col in final_df.columns}
+                    for col in ['CURRENCY', 'F.TIME', 'REMARKS']:
+                        if col in final_df.columns:
+                            agg_funcs[col] = 'first'
 
-                    # Display sorted by 40'DC/HC prices (cheapest first)
-                    st.subheader("🔹 Sorted by Cheapest 40'DC/HC Prices")
-                    st.dataframe(grouped_df[['POD', 'CARRIER', "40'DC/HC", 'CURRENCY', 'F.TIME', 'REMARKS']].sort_values(by="40'DC/HC"))
-                else:
-                    st.warning(f"No results found for {selected_pol} to {selected_pod}")
-        
-        # Add feature to show raw data
-        if st.checkbox("Show raw data"):
-            st.subheader("Raw Data")
-            st.write(df)
+                    grouped_df = final_df.groupby(['POL', 'POD'], as_index=False).agg(agg_funcs)
+
+                    if not grouped_df.empty:
+                        st.subheader(f"📊 Shipping Summary: {selected_pol} ➡ {selected_pod}")
+
+                        if "20'DC" in grouped_df.columns:
+                            st.subheader("🔹 Cheapest 20'DC Options")
+                            st.dataframe(grouped_df.sort_values(by="20'DC")[available_cols])
+
+                        if "40'DC/HC" in grouped_df.columns:
+                            st.subheader("🔹 Cheapest 40'DC/HC Options")
+                            st.dataframe(grouped_df.sort_values(by="40'DC/HC")[available_cols])
+                    else:
+                        st.warning("No data found for this route.")
+
+            if st.checkbox("📄 Show raw uploaded data"):
+                st.dataframe(df)
 
     except Exception as e:
-        st.error(f"An error occurred: {str(e)}")
+        st.error(f"❌ Error: {str(e)}")
